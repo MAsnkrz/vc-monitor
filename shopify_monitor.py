@@ -1,22 +1,15 @@
-## “””
-Shopify Stock Monitor - Discord Webhook Notifier
+# -*- coding: utf-8 -*-
 
+“””
+Shopify Stock Monitor - Discord Webhook Notifier
 Monitors the ENTIRE Very Cosmetics store for:
 
-- New products (new product ID appears in store)
+- New products
 - Variants going in / out of stock
-- Quantity increases on products with a stored qty
-
-How it works:
-
-1. Fetches ALL products from the store with pagination
-1. Compares against snapshot.json from the previous run
-1. Fires Discord embeds for any changes found
-1. Saves a fresh snapshot so the next run can compare
-
-Run:   py shopify_monitor.py
-Deps:  pip install requests
-“””
+- Quantity increases
+  Run:   python shopify_monitor.py
+  Deps:  pip install requests
+  “””
 
 import json
 import os
@@ -25,7 +18,7 @@ import time
 import requests
 from datetime import datetime, timezone
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
+# — CONFIG —————————————————————––
 
 BASE_URL        = “https://www.verycosmetics.co.uk”
 DISCORD_WEBHOOK = os.getenv(
@@ -33,34 +26,42 @@ DISCORD_WEBHOOK = os.getenv(
 “https://discord.com/api/webhooks/929897869450809345/”
 “HTxoTfFFJCVX82M0hdq-2uUXwYXiuRajhFjPQRJYjI2h2j4wn6RZZEnXiu1sR5XsUKEv”
 )
-CHECK_INTERVAL  = int(os.getenv(“CHECK_INTERVAL”, “300”))   # seconds (5 min)
-RUN_ONCE        = os.getenv(“RUN_ONCE”, “false”).lower() == “true”  # set by GitHub Actions
+CHECK_INTERVAL  = int(os.getenv(“CHECK_INTERVAL”, “300”))
+RUN_ONCE        = os.getenv(“RUN_ONCE”, “false”).lower() == “true”
 SNAPSHOT_FILE   = “snapshot.json”
-PAGE_SIZE       = 250     # max Shopify allows per page
-REQUEST_DELAY   = 0.5     # polite delay between paginated fetches (seconds)
+PAGE_SIZE       = 250
+REQUEST_DELAY   = 0.5
 
 HEADERS = {“User-Agent”: “Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36”}
 
-# Discord embed colours
+COLOUR_NEW       = 0x57F287
+COLOUR_IN_STOCK  = 0x3498DB
+COLOUR_OUT_STOCK = 0xE74C3C
+COLOUR_QTY_UP    = 0xF1C40F
 
-COLOUR_NEW       = 0x57F287   # green  — new product
-COLOUR_IN_STOCK  = 0x3498DB   # blue   — back in stock
-COLOUR_OUT_STOCK = 0xE74C3C   # red    — out of stock
-COLOUR_QTY_UP    = 0xF1C40F   # yellow — qty increased
+POUND = “\u00a3”
 
-# ─── UTILITIES ─────────────────────────────────────────────────────────────────
+# — UTILITIES ––––––––––––––––––––––––––––––––
 
 def ts():
 return datetime.now(timezone.utc).strftime(”%H:%M:%S UTC”)
 
 def vat_price(price_str):
 try:
-return f”{float(price_str) * 1.2:.2f}”
+return “{:.2f}”.format(float(price_str) * 1.2)
 except (ValueError, TypeError):
 return str(price_str)
 
 def barcode_field(code):
-return {“name”: “Barcode”, “value”: f”`{code}`” if code else “—”, “inline”: True}
+value = “`{}`”.format(code) if code else “-”
+return {“name”: “Barcode”, “value”: value, “inline”: True}
+
+def selleramp_field(barcode, price_str):
+if not barcode:
+return {“name”: “SellerAmp”, “value”: “-”, “inline”: False}
+price = vat_price(price_str)
+url   = “https://sas.selleramp.com/sas/lookup/?search_term={}&sas_cost_price={}”.format(barcode, price)
+return {“name”: “SellerAmp”, “value”: “[Open in SellerAmp]({})”.format(url), “inline”: False}
 
 def find_pid(state, handle):
 for pid, p in state.items():
@@ -68,76 +69,59 @@ if p.get(“handle”) == handle:
 return pid
 return None
 
-# ─── FETCHING ──────────────────────────────────────────────────────────────────
+# — FETCHING —————————————————————–
 
 def fetch_all_products():
-“”“Paginate through /products.json and return every product in the store.”””
 all_products = []
 page = 1
 while True:
-url = f”{BASE_URL}/products.json?limit={PAGE_SIZE}&page={page}”
+url = “{}/products.json?limit={}&page={}”.format(BASE_URL, PAGE_SIZE, page)
 try:
 r = requests.get(url, headers=HEADERS, timeout=15)
 r.raise_for_status()
 batch = r.json().get(“products”, [])
 except Exception as exc:
-print(f”[{ts()}] Fetch error (page {page}): {exc}”)
+print(”[{}] Fetch error (page {}): {}”.format(ts(), page, exc))
 break
-
-```
-    if not batch:
-        break
-
-    all_products.extend(batch)
-    print(f"[{ts()}] Page {page} — {len(all_products)} products fetched so far")
-
-    if len(batch) < PAGE_SIZE:
-        break
-
-    page += 1
-    time.sleep(REQUEST_DELAY)
-
+if not batch:
+break
+all_products.extend(batch)
+print(”[{}] Page {} - {} products fetched so far”.format(ts(), page, len(all_products)))
+if len(batch) < PAGE_SIZE:
+break
+page += 1
+time.sleep(REQUEST_DELAY)
 return all_products
-```
 
 def fetch_product_page_data(handle):
-“””
-Returns {“barcodes”: {variant_id: str}, “qty”: int|None}
-Barcodes from product JSON, qty from ‘var QTY = N;’ in page HTML.
-“””
 result = {“barcodes”: {}, “qty”: None}
 try:
-r = requests.get(f”{BASE_URL}/products/{handle}.json”, headers=HEADERS, timeout=15)
+r = requests.get(”{}/products/{}.json”.format(BASE_URL, handle), headers=HEADERS, timeout=15)
 r.raise_for_status()
 variants = r.json().get(“product”, {}).get(“variants”, [])
 result[“barcodes”] = {str(v[“id”]): v.get(“barcode”, “”) or “” for v in variants}
 except Exception as exc:
-print(f”[{ts()}] Barcode error ({handle}): {exc}”)
-
-```
+print(”[{}] Barcode error ({}): {}”.format(ts(), handle, exc))
 try:
-    r = requests.get(f"{BASE_URL}/products/{handle}", headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    m = re.search(r'var\s+QTY\s*=\s*(\d+)', r.text)
-    if m:
-        result["qty"] = int(m.group(1))
+r = requests.get(”{}/products/{}”.format(BASE_URL, handle), headers=HEADERS, timeout=15)
+r.raise_for_status()
+m = re.search(r”var\s+QTY\s*=\s*(\d+)”, r.text)
+if m:
+result[“qty”] = int(m.group(1))
 except Exception as exc:
-    print(f"[{ts()}] QTY error ({handle}): {exc}")
-
+print(”[{}] QTY error ({}): {}”.format(ts(), handle, exc))
 return result
-```
 
 def fetch_qty(handle):
-“”“Quick qty-only fetch for the periodic qty-increase check.”””
 try:
-r = requests.get(f”{BASE_URL}/products/{handle}”, headers=HEADERS, timeout=15)
+r = requests.get(”{}/products/{}”.format(BASE_URL, handle), headers=HEADERS, timeout=15)
 r.raise_for_status()
-m = re.search(r’var\s+QTY\s*=\s*(\d+)’, r.text)
+m = re.search(r”var\s+QTY\s*=\s*(\d+)”, r.text)
 return int(m.group(1)) if m else None
 except Exception:
 return None
 
-# ─── STATE ─────────────────────────────────────────────────────────────────────
+# — STATE ––––––––––––––––––––––––––––––––––
 
 def flatten_variants(product):
 pack_size_pos = None
@@ -145,25 +129,18 @@ for i, opt in enumerate(product.get(“options”, []), start=1):
 if “pack” in opt.get(“name”, “”).lower():
 pack_size_pos = i
 break
-
-```
 result = {}
-for v in product.get("variants", []):
-    result[str(v["id"])] = {
-        "title":     v.get("title", ""),
-        "available": v.get("available", False),
-        "price":     v.get("price", ""),
-        "sku":       v.get("sku", ""),
-        "pack_size": v.get(f"option{pack_size_pos}", "") or "" if pack_size_pos else "",
-    }
+for v in product.get(“variants”, []):
+result[str(v[“id”])] = {
+“title”:     v.get(“title”, “”),
+“available”: v.get(“available”, False),
+“price”:     v.get(“price”, “”),
+“sku”:       v.get(“sku”, “”),
+“pack_size”: v.get(“option{}”.format(pack_size_pos), “”) or “” if pack_size_pos else “”,
+}
 return result
-```
 
 def build_state(products):
-“””
-{product_id: {title, handle, image, qty, variants}}
-qty is None until populated after a page fetch.
-“””
 state = {}
 for p in products:
 pid   = str(p[“id”])
@@ -187,7 +164,7 @@ def save_snapshot(state):
 with open(SNAPSHOT_FILE, “w”) as fh:
 json.dump(state, fh)
 
-# ─── DISCORD ───────────────────────────────────────────────────────────────────
+# — DISCORD ——————————————————————
 
 def send_embed(title, description, colour, url=””, image=””, fields=None):
 embed = {
@@ -204,225 +181,178 @@ try:
 r = requests.post(DISCORD_WEBHOOK, json={“embeds”: [embed]}, timeout=10)
 r.raise_for_status()
 except Exception as exc:
-print(f”[{ts()}] Discord error: {exc}”)
-
-def selleramp_field(barcode, price_str):
-“”“SellerAmp SAS lookup link using barcode and VAT price.”””
-if not barcode:
-return {“name”: “SellerAmp”, “value”: “—”, “inline”: False}
-price = vat_price(price_str)
-url   = f”https://sas.selleramp.com/sas/lookup/?search_term={barcode}&sas_cost_price={price}”
-return {“name”: “SellerAmp”, “value”: f”[🔍 Open in SellerAmp]({url})”, “inline”: False}
+print(”[{}] Discord error: {}”.format(ts(), exc))
 
 def variant_fields(v, barcode, qty, old_qty=None):
-“”“Standard fields for a variant — price, SKU, barcode, qty, pack size, SellerAmp.”””
-qty_value = “—”
+qty_value = “-”
 if qty is not None:
-qty_value = f”{old_qty} → **{qty}**” if (old_qty is not None and old_qty != qty) else str(qty)
-
-```
+if old_qty is not None and old_qty != qty:
+qty_value = “{} -> **{}**”.format(old_qty, qty)
+else:
+qty_value = str(qty)
 fields = [
-    {"name": "Price (inc. VAT)", "value": f"£{vat_price(v['price'])}", "inline": True},
-    {"name": "SKU",              "value": v["sku"] or "—",             "inline": True},
-    barcode_field(barcode),
-    {"name": "Qty Available",    "value": qty_value,                   "inline": True},
+{“name”: “Price (inc. VAT)”, “value”: “{}{}”.format(POUND, vat_price(v[“price”])), “inline”: True},
+{“name”: “SKU”,              “value”: v[“sku”] or “-”,                              “inline”: True},
+barcode_field(barcode),
+{“name”: “Qty Available”,    “value”: qty_value,                                    “inline”: True},
 ]
-if v.get("pack_size"):
-    fields.append({"name": "Pack Size", "value": v["pack_size"], "inline": True})
-fields.append(selleramp_field(barcode, v["price"]))
+if v.get(“pack_size”):
+fields.append({“name”: “Pack Size”, “value”: v[“pack_size”], “inline”: True})
+fields.append(selleramp_field(barcode, v[“price”]))
 return fields
-```
 
-# ─── NOTIFICATIONS ─────────────────────────────────────────────────────────────
+# — NOTIFICATIONS ————————————————————
 
 def notify_new_product(product, new_state):
 variants  = product[“variants”]
 available = sum(1 for v in variants.values() if v[“available”])
-
-```
-page_data = fetch_product_page_data(product["handle"])
-barcodes  = page_data["barcodes"]
-qty       = page_data["qty"]
-
-pid = find_pid(new_state, product["handle"])
+page_data = fetch_product_page_data(product[“handle”])
+barcodes  = page_data[“barcodes”]
+qty       = page_data[“qty”]
+pid = find_pid(new_state, product[“handle”])
 if pid:
-    new_state[pid]["qty"] = qty   # persist for next run's qty comparison
-
+new_state[pid][“qty”] = qty
 fields = []
 for vid, v in list(variants.items())[:4]:
-    status  = "✅ In stock" if v["available"] else "❌ Out of stock"
-    barcode = barcodes.get(vid, "")
-    fields.append({
-        "name":   v["title"] if v["title"] != "Default Title" else "Default",
-        "value":  f"{status}\n£{vat_price(v['price'])} inc. VAT",
-        "inline": True,
-    })
-    fields.append(barcode_field(barcode))
-    fields.append(selleramp_field(barcode, v["price"]))
-
+status  = “In stock” if v[“available”] else “Out of stock”
+barcode = barcodes.get(vid, “”)
+fields.append({
+“name”:   v[“title”] if v[“title”] != “Default Title” else “Default”,
+“value”:  “{}\n{}{} inc. VAT”.format(status, POUND, vat_price(v[“price”])),
+“inline”: True,
+})
+fields.append(barcode_field(barcode))
+fields.append(selleramp_field(barcode, v[“price”]))
 if qty is not None:
-    fields.append({"name": "Qty Available", "value": str(qty), "inline": True})
-
+fields.append({“name”: “Qty Available”, “value”: str(qty), “inline”: True})
 send_embed(
-    title       = f"🆕 New arrival: {product['title']}",
-    description = f"{available}/{len(variants)} variants in stock",
-    colour      = COLOUR_NEW,
-    url         = f"{BASE_URL}/products/{product['handle']}",
-    image       = product["image"],
-    fields      = fields,
+title       = “New arrival: {}”.format(product[“title”]),
+description = “{}/{} variants in stock”.format(available, len(variants)),
+colour      = COLOUR_NEW,
+url         = “{}/products/{}”.format(BASE_URL, product[“handle”]),
+image       = product[“image”],
+fields      = fields,
 )
-```
 
 def notify_stock_change(product, variant_id, variant_title, old_v, new_v, new_state):
 went_in  = not old_v[“available”] and new_v[“available”]
 went_out = old_v[“available”]     and not new_v[“available”]
 if not went_in and not went_out:
 return
-
-```
-page_data = fetch_product_page_data(product["handle"])
-barcode   = page_data["barcodes"].get(variant_id, "")
-qty       = page_data["qty"]
-
-pid = find_pid(new_state, product["handle"])
+page_data = fetch_product_page_data(product[“handle”])
+barcode   = page_data[“barcodes”].get(variant_id, “”)
+qty       = page_data[“qty”]
+pid = find_pid(new_state, product[“handle”])
 if pid:
-    new_state[pid]["qty"] = qty   # persist for next run
-
-title  = (f"✅ Back in stock: {product['title']}" if went_in
-          else f"❌ Out of stock: {product['title']}")
-desc   = (f"**{variant_title}** is now available" if went_in
-          else f"**{variant_title}** just sold out")
-colour = COLOUR_IN_STOCK if went_in else COLOUR_OUT_STOCK
-
+new_state[pid][“qty”] = qty
+if went_in:
+title  = “Back in stock: {}”.format(product[“title”])
+desc   = “**{}** is now available”.format(variant_title)
+colour = COLOUR_IN_STOCK
+else:
+title  = “Out of stock: {}”.format(product[“title”])
+desc   = “**{}** just sold out”.format(variant_title)
+colour = COLOUR_OUT_STOCK
 send_embed(
-    title       = title,
-    description = desc,
-    colour      = colour,
-    url         = f"{BASE_URL}/products/{product['handle']}",
-    image       = product["image"],
-    fields      = variant_fields(new_v, barcode, qty),
+title       = title,
+description = desc,
+colour      = colour,
+url         = “{}/products/{}”.format(BASE_URL, product[“handle”]),
+image       = product[“image”],
+fields      = variant_fields(new_v, barcode, qty),
 )
-```
 
 def notify_qty_increase(product, old_qty, new_qty, new_state):
 pid = find_pid(new_state, product[“handle”])
 if pid:
 new_state[pid][“qty”] = new_qty
-
-```
-variants = product["variants"]
-first_v  = next((v for v in variants.values() if v["available"]),
-                next(iter(variants.values()), {}))
-first_vid = next((vid for vid, v in variants.items() if v["available"]), "")
-
-page_data = fetch_product_page_data(product["handle"])
-barcode   = page_data["barcodes"].get(first_vid, "")
-
+variants  = product[“variants”]
+first_v   = next((v for v in variants.values() if v[“available”]),
+next(iter(variants.values()), {}))
+first_vid = next((vid for vid, v in variants.items() if v[“available”]), “”)
+page_data = fetch_product_page_data(product[“handle”])
+barcode   = page_data[“barcodes”].get(first_vid, “”)
 send_embed(
-    title       = f"📦 Restocked: {product['title']}",
-    description = f"Quantity increased from **{old_qty}** → **{new_qty}**",
-    colour      = COLOUR_QTY_UP,
-    url         = f"{BASE_URL}/products/{product['handle']}",
-    image       = product["image"],
-    fields      = variant_fields(first_v, barcode, new_qty, old_qty),
+title       = “Restocked: {}”.format(product[“title”]),
+description = “Quantity increased from **{}** to **{}**”.format(old_qty, new_qty),
+colour      = COLOUR_QTY_UP,
+url         = “{}/products/{}”.format(BASE_URL, product[“handle”]),
+image       = product[“image”],
+fields      = variant_fields(first_v, barcode, new_qty, old_qty),
 )
-```
 
-# ─── DIFF ──────────────────────────────────────────────────────────────────────
+# — DIFF ———————————————————————
 
 def diff_and_notify(old_state, new_state):
 changes = 0
-
-```
 for pid, new_p in new_state.items():
-
-    # ── New product ──────────────────────────────────────────────────────
-    if pid not in old_state:
-        print(f"[{ts()}] NEW PRODUCT: {new_p['title']}")
-        notify_new_product(new_p, new_state)
-        changes += 1
-        continue
-
-    old_p        = old_state[pid]
-    old_variants = old_p["variants"]
-    new_variants = new_p["variants"]
-
-    # Carry forward stored qty if we haven't refreshed it yet this cycle
-    if new_p["qty"] is None and old_p.get("qty") is not None:
-        new_state[pid]["qty"] = old_p["qty"]
-
-    # ── Variant availability changes ──────────────────────────────────────
-    for vid, new_v in new_variants.items():
-        if vid not in old_variants:
-            if new_v["available"]:
-                notify_stock_change(new_p, vid, new_v["title"],
-                                    {"available": False}, new_v, new_state)
-                changes += 1
-            continue
-
-        old_v  = old_variants[vid]
-        vtitle = new_v["title"] if new_v["title"] != "Default Title" else new_p["title"]
-
-        if old_v["available"] != new_v["available"]:
-            print(f"[{ts()}] STOCK CHANGE: {new_p['title']} — {vtitle}")
-            notify_stock_change(new_p, vid, vtitle, old_v, new_v, new_state)
-            changes += 1
-
-    # ── Qty increase check (only for products with a stored previous qty) ─
-    old_qty = old_p.get("qty")
-    is_available = any(v["available"] for v in new_variants.values())
-
-    if old_qty is not None and is_available:
-        new_qty = fetch_qty(new_p["handle"])
-        if new_qty is not None:
-            new_state[pid]["qty"] = new_qty
-            if new_qty > old_qty:
-                print(f"[{ts()}] QTY INCREASE: {new_p['title']} {old_qty} → {new_qty}")
-                notify_qty_increase(new_p, old_qty, new_qty, new_state)
-                changes += 1
-        time.sleep(0.3)   # avoid rate-limiting across large catalogues
-
+if pid not in old_state:
+print(”[{}] NEW PRODUCT: {}”.format(ts(), new_p[“title”]))
+notify_new_product(new_p, new_state)
+changes += 1
+continue
+old_p        = old_state[pid]
+old_variants = old_p[“variants”]
+new_variants = new_p[“variants”]
+if new_p[“qty”] is None and old_p.get(“qty”) is not None:
+new_state[pid][“qty”] = old_p[“qty”]
+for vid, new_v in new_variants.items():
+if vid not in old_variants:
+if new_v[“available”]:
+notify_stock_change(new_p, vid, new_v[“title”],
+{“available”: False}, new_v, new_state)
+changes += 1
+continue
+old_v  = old_variants[vid]
+vtitle = new_v[“title”] if new_v[“title”] != “Default Title” else new_p[“title”]
+if old_v[“available”] != new_v[“available”]:
+print(”[{}] STOCK CHANGE: {} - {}”.format(ts(), new_p[“title”], vtitle))
+notify_stock_change(new_p, vid, vtitle, old_v, new_v, new_state)
+changes += 1
+old_qty      = old_p.get(“qty”)
+is_available = any(v[“available”] for v in new_variants.values())
+if old_qty is not None and is_available:
+new_qty = fetch_qty(new_p[“handle”])
+if new_qty is not None:
+new_state[pid][“qty”] = new_qty
+if new_qty > old_qty:
+print(”[{}] QTY INCREASE: {} {} -> {}”.format(ts(), new_p[“title”], old_qty, new_qty))
+notify_qty_increase(new_p, old_qty, new_qty, new_state)
+changes += 1
+time.sleep(0.3)
 if changes == 0:
-    print(f"[{ts()}] No changes detected.")
+print(”[{}] No changes detected.”.format(ts()))
 else:
-    print(f"[{ts()}] {changes} change(s) notified.")
-```
+print(”[{}] {} change(s) notified.”.format(ts(), changes))
 
-# ─── MAIN ──────────────────────────────────────────────────────────────────────
+# — MAIN ———————————————————————
 
 def main():
-print(f”Very Cosmetics monitor starting”
-f”{’ (single run)’ if RUN_ONCE else f’ — checking every {CHECK_INTERVAL}s’}”)
-print(f”  Store    : {BASE_URL}”)
-print(f”  Snapshot : {SNAPSHOT_FILE}\n”)
-
-```
+mode = “ (single run)” if RUN_ONCE else “ - checking every {}s”.format(CHECK_INTERVAL)
+print(“Very Cosmetics monitor starting{}”.format(mode))
+print(”  Store    : {}”.format(BASE_URL))
+print(”  Snapshot : {}”.format(SNAPSHOT_FILE))
 while True:
-    products = fetch_all_products()
-    if not products:
-        print(f"[{ts()}] No products returned — retrying after interval.")
-        if RUN_ONCE:
-            return
-        time.sleep(CHECK_INTERVAL)
-        continue
-
-    new_state = build_state(products)
-    old_state = load_snapshot()
-
-    if old_state:
-        diff_and_notify(old_state, new_state)
-    else:
-        print(f"[{ts()}] First run — snapshotted {len(new_state)} products. "
-              "Monitoring from next check.")
-
-    save_snapshot(new_state)
-
-    if RUN_ONCE:
-        print(f"[{ts()}] Single run complete.")
-        return
-
-    time.sleep(CHECK_INTERVAL)
-```
+products = fetch_all_products()
+if not products:
+print(”[{}] No products returned - retrying after interval.”.format(ts()))
+if RUN_ONCE:
+return
+time.sleep(CHECK_INTERVAL)
+continue
+new_state = build_state(products)
+old_state = load_snapshot()
+if old_state:
+diff_and_notify(old_state, new_state)
+else:
+print(”[{}] First run - snapshotted {} products. Monitoring from next check.”.format(
+ts(), len(new_state)))
+save_snapshot(new_state)
+if RUN_ONCE:
+print(”[{}] Single run complete.”.format(ts()))
+return
+time.sleep(CHECK_INTERVAL)
 
 if **name** == “**main**”:
 main()
+
