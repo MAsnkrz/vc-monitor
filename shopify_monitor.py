@@ -1,5 +1,5 @@
 ## “””
-Shopify Stock Monitor — Discord Webhook Notifier
+Shopify Stock Monitor - Discord Webhook Notifier
 
 Monitors the ENTIRE Very Cosmetics store for:
 
