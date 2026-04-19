@@ -308,13 +308,13 @@ def diff_and_notify(old_state, new_state):
         is_available = any(v["available"] for v in new_variants.values())
         if old_qty is not None and is_available:
             new_qty = fetch_qty(new_p["handle"])
+            time.sleep(0.2)   # only delay when we actually fetched a page
             if new_qty is not None:
                 new_state[pid]["qty"] = new_qty
                 if new_qty > old_qty:
                     print("[{}] QTY INCREASE: {} {} -> {}".format(ts(), new_p["title"], old_qty, new_qty))
                     notify_qty_increase(new_p, old_qty, new_qty, new_state)
                     changes += 1
-            time.sleep(0.3)
     if changes == 0:
         print("[{}] No changes detected.".format(ts()))
     else:
