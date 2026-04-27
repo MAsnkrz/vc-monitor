@@ -282,6 +282,10 @@ def diff_and_notify(old_state, new_state):
     changes = 0
     for pid, new_p in new_state.items():
         if pid not in old_state:
+            has_stock = any(v["available"] for v in new_p["variants"].values())
+            if not has_stock:
+                print("[{}] NEW PRODUCT (skipped - no stock): {}".format(ts(), new_p["title"]))
+                continue
             print("[{}] NEW PRODUCT: {}".format(ts(), new_p["title"]))
             notify_new_product(new_p, new_state)
             changes += 1
