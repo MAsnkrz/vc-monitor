@@ -147,14 +147,26 @@ def build_state(products):
 
 def load_snapshot():
     if os.path.exists(SNAPSHOT_FILE):
-        with open(SNAPSHOT_FILE, "r") as fh:
-            return json.load(fh)
+        try:
+            with open(SNAPSHOT_FILE, "r") as fh:
+                return json.load(fh)
+        except json.JSONDecodeError as exc:
+            backup = "{}.corrupted.{}".format(SNAPSHOT_FILE, int(time.time()))
+            print("[{}] Snapshot corrupted ({}), backing up to {} and starting fresh".format(
+                ts(), exc, backup))
+            try:
+                os.rename(SNAPSHOT_FILE, backup)
+            except OSError:
+                pass
+            return {}
     return {}
 
 
 def save_snapshot(state):
-    with open(SNAPSHOT_FILE, "w") as fh:
+    tmp = SNAPSHOT_FILE + ".tmp"
+    with open(tmp, "w") as fh:
         json.dump(state, fh)
+    os.replace(tmp, SNAPSHOT_FILE)
 
 # --- DISCORD ------------------------------------------------------------------
 
